@@ -147,6 +147,32 @@ PTR_HASH_API size_t ptr_hash_index_batch_bytes(const ptr_hash_t *handle,
                                                const size_t *lengths, size_t n,
                                                uint64_t *out);
 
+/*
+ * Serialize a handle into a self-contained blob.
+ *
+ * The blob can be stored anywhere and passed to ptr_hash_load_blob(). It is
+ * allocated by the library and must be released with ptr_hash_free_blob().
+ * Returns 0 on success, -1 on failure (see ptr_hash_last_error()).
+ * Only the default and fast variants are serializable.
+ */
+PTR_HASH_API int ptr_hash_save_blob(const ptr_hash_t *handle, uint8_t **out,
+                                    size_t *out_len);
+
+/* Release a blob returned by ptr_hash_save_blob(). */
+PTR_HASH_API void ptr_hash_free_blob(uint8_t *blob, size_t len);
+
+/* Rebuild a handle from a blob produced by ptr_hash_save_blob(). */
+PTR_HASH_API ptr_hash_t *ptr_hash_load_blob(const uint8_t *blob, size_t len);
+
+/* Size in bytes of the serialized form, or 0 for a null handle. */
+PTR_HASH_API size_t ptr_hash_serialized_size(const ptr_hash_t *handle);
+
+/*
+ * Set the number of threads used by construction (global rayon pool).
+ * Call once before the first build; later calls are ignored.
+ */
+PTR_HASH_API int ptr_hash_set_threads(size_t threads);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

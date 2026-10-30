@@ -11,8 +11,10 @@
 
 #![allow(non_camel_case_types)]
 
-use crate::hash::Xxh3_128;
+use crate::hash::{Xxh3Int, Xxh3_128};
 use crate::{CompactPtrHash, DefaultPtrHash, FastPtrHash, PtrHashParams};
+#[cfg(feature = "epserde")]
+use epserde::prelude::*;
 use std::cell::RefCell;
 use std::ffi::{CString, c_char, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -42,10 +44,13 @@ pub enum ptr_hash_status {
     PTR_HASH_ERR_PANIC = 3,
 }
 
+// The integer handles use Xxh3Int (rather than the default integer hasher)
+// because it implements the epserde traits, which the save/load entry points
+// below need.
 enum U64Mphf {
-    Default(DefaultPtrHash),
-    Fast(FastPtrHash),
-    Compact(CompactPtrHash),
+    Default(DefaultPtrHash<Xxh3Int>),
+    Fast(FastPtrHash<Xxh3Int>),
+    Compact(CompactPtrHash<Xxh3Int>),
 }
 
 type BytesDefault = DefaultPtrHash<Xxh3_128, &'static [u8]>;
@@ -133,15 +138,15 @@ fn finish_build(
 fn build_u64(keys: &[u64], variant: c_int) -> Result<ptr_hash_t, BuildError> {
     let inner = match variant {
         VARIANT_DEFAULT => U64Mphf::Default(
-            DefaultPtrHash::try_new(keys, PtrHashParams::default())
+            DefaultPtrHash::<Xxh3Int>::try_new(keys, PtrHashParams::default())
                 .ok_or_else(|| BuildError::construction("default"))?,
         ),
         VARIANT_FAST => U64Mphf::Fast(
-            FastPtrHash::try_new(keys, PtrHashParams::default())
+            FastPtrHash::<Xxh3Int>::try_new(keys, PtrHashParams::default())
                 .ok_or_else(|| BuildError::construction("fast"))?,
         ),
         VARIANT_COMPACT => U64Mphf::Compact(
-            CompactPtrHash::try_new(keys, PtrHashParams::default_compact())
+            CompactPtrHash::<Xxh3Int>::try_new(keys, PtrHashParams::default_compact())
                 .ok_or_else(|| BuildError::construction("compact"))?,
         ),
         _ => return Err(BuildError::invalid("unknown ptr_hash_variant value")),
@@ -542,4 +547,183 @@ pub unsafe extern "C" fn ptr_hash_index_batch_bytes(
         Inner::U64(_) => return usize::MAX,
     }
     n
+}
+
+// ---------------------------------------------------------------------------
+// Persistence and construction tuning
+// ---------------------------------------------------------------------------
+
+/// Serialize a handle into a self-contained blob.
+///
+/// The blob starts with a one-byte tag identifying the variant; release it with
+/// `ptr_hash_free_blob(*out, *out_len)`. Returns 0 on success, -1 on failure.
+#[cfg(feature = "epserde")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ptr_hash_save_blob(
+    handle: *const ptr_hash_t,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> c_int {
+    if handle.is_null() || out.is_null() || out_len.is_null() {
+        set_last_error("ptr_hash_save_blob: null argument");
+        return -1;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let handle = unsafe { &*handle };
+        let mut blob: Vec<u8> = Vec::new();
+        let tag: u8 = match &handle.inner {
+            Inner::U64(m) => match m {
+                U64Mphf::Default(x) => {
+                    unsafe { x.serialize(&mut blob) }.ok()?;
+                    0
+                }
+                U64Mphf::Fast(x) => {
+                    unsafe { x.serialize(&mut blob) }.ok()?;
+                    1
+                }
+                // The compact variant packs its buckets with EliasFano, which
+                // does not implement the epserde traits.
+                U64Mphf::Compact(_) => return None,
+            },
+            Inner::Bytes(m) => match m {
+                BytesMphf::Default(x) => {
+                    unsafe { x.serialize(&mut blob) }.ok()?;
+                    16
+                }
+                BytesMphf::Fast(x) => {
+                    unsafe { x.serialize(&mut blob) }.ok()?;
+                    17
+                }
+                BytesMphf::Compact(_) => return None,
+            },
+        };
+        let mut full = Vec::with_capacity(blob.len() + 1);
+        full.push(tag);
+        full.extend_from_slice(&blob);
+        let boxed: Box<[u8]> = full.into_boxed_slice();
+        let len = boxed.len();
+        let raw = Box::into_raw(boxed) as *mut u8;
+        unsafe {
+            *out = raw;
+            *out_len = len;
+        }
+        Some(())
+    }));
+    match result {
+        Ok(Some(())) => {
+            set_last_error("");
+            0
+        }
+        Ok(None) => {
+            set_last_error("ptr_hash_save_blob: serialization failed");
+            -1
+        }
+        Err(_) => {
+            set_last_error("ptr_hash_save_blob: panic");
+            -1
+        }
+    }
+}
+
+/// Release a blob returned by `ptr_hash_save_blob`.
+#[cfg(feature = "epserde")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ptr_hash_free_blob(blob: *mut u8, len: usize) {
+    if blob.is_null() {
+        return;
+    }
+    unsafe {
+        let slice = ptr::slice_from_raw_parts_mut(blob, len);
+        drop(Box::from_raw(slice));
+    }
+}
+
+/// Rebuild a handle from a blob produced by `ptr_hash_save_blob`.
+#[cfg(feature = "epserde")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ptr_hash_load_blob(blob: *const u8, len: usize) -> *mut ptr_hash_t {
+    if blob.is_null() || len < 2 {
+        set_last_error("ptr_hash_load_blob: empty or null blob");
+        return ptr::null_mut();
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let bytes = unsafe { slice::from_raw_parts(blob, len) };
+        let tag = bytes[0];
+        let mut rest: &[u8] = &bytes[1..];
+        let inner = match tag {
+            0 => Inner::U64(U64Mphf::Default(unsafe {
+                DefaultPtrHash::<Xxh3Int>::deserialize_full(&mut rest).ok()?
+            })),
+            1 => Inner::U64(U64Mphf::Fast(unsafe {
+                FastPtrHash::<Xxh3Int>::deserialize_full(&mut rest).ok()?
+            })),
+            16 => Inner::Bytes(BytesMphf::Default(unsafe {
+                BytesDefault::deserialize_full(&mut rest).ok()?
+            })),
+            17 => Inner::Bytes(BytesMphf::Fast(unsafe {
+                BytesFast::deserialize_full(&mut rest).ok()?
+            })),
+            _ => return None,
+        };
+        Some(ptr_hash_t { inner })
+    }));
+    match result {
+        Ok(Some(handle)) => {
+            set_last_error("");
+            Box::into_raw(Box::new(handle))
+        }
+        Ok(None) => {
+            set_last_error("ptr_hash_load_blob: invalid blob");
+            ptr::null_mut()
+        }
+        Err(_) => {
+            set_last_error("ptr_hash_load_blob: panic");
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Serialized size in bytes, or 0 for a null handle / on failure.
+#[cfg(feature = "epserde")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ptr_hash_serialized_size(handle: *const ptr_hash_t) -> usize {
+    if handle.is_null() {
+        return 0;
+    }
+    let handle = unsafe { &*handle };
+    let mut blob: Vec<u8> = Vec::new();
+    let ok = match &handle.inner {
+        Inner::U64(m) => match m {
+            U64Mphf::Default(x) => unsafe { x.serialize(&mut blob) }.is_ok(),
+            U64Mphf::Fast(x) => unsafe { x.serialize(&mut blob) }.is_ok(),
+            U64Mphf::Compact(_) => false,
+        },
+        Inner::Bytes(m) => match m {
+            BytesMphf::Default(x) => unsafe { x.serialize(&mut blob) }.is_ok(),
+            BytesMphf::Fast(x) => unsafe { x.serialize(&mut blob) }.is_ok(),
+            BytesMphf::Compact(_) => false,
+        },
+    };
+    if ok { blob.len() + 1 } else { 0 }
+}
+
+/// Configure the global rayon pool used by construction.
+///
+/// Call once before the first build. Returns 0 on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn ptr_hash_set_threads(threads: usize) -> c_int {
+    #[cfg(feature = "rayon")]
+    {
+        if threads == 0 {
+            return 0;
+        }
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global();
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        let _ = threads;
+    }
+    0
 }

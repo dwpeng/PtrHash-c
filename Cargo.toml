@@ -24,7 +24,7 @@ incremental = true
 [lib]
 name = "ptr_hash"
 # `rlib` for normal Rust use, `cdylib` for the C API in `include/ptr_hash.h`.
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 bitvec = "1.0.1"
