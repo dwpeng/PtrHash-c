@@ -10,7 +10,7 @@ description = "A high-throughput minimal perfect hash function"
 readme = "readme.md"
 keywords = ["hashing", "minimal", "perfect", "mphf"]
 categories = ["data-structures", "science"]
-include = ["src/**/*", "examples/*", "readme.md"]
+include = ["src/**/*", "examples/*", "include/*", "c_api/*", "readme.md"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -20,6 +20,11 @@ debug = true
 # Needed for good inlining across crates, in particular murmur2.
 lto = "thin"
 incremental = true
+
+[lib]
+name = "ptr_hash"
+# `rlib` for normal Rust use, `cdylib` for the C API in `include/ptr_hash.h`.
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 bitvec = "1.0.1"

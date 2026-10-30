@@ -160,6 +160,8 @@ pub mod pack;
 pub mod util;
 
 pub mod bucket_fn;
+#[doc(hidden)]
+pub mod c_api;
 mod bucket_idx;
 mod build;
 mod fastmod;

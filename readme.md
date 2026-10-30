@@ -135,6 +135,36 @@ The `PtrHash` datastructure can be (de)serialized to/from disk using
 This also allows convenient deserialization using `mmap`.
 See [examples/epserde.rs](examples/epserde.rs) for an example.
 
+## C API
+
+The crate also builds a `cdylib` (`libptr_hash.so`, `libptr_hash.dylib`, or
+`ptr_hash.dll`) with a C header at [include/ptr_hash.h](include/ptr_hash.h).
+It supports `uint64_t` keys and byte-string keys, the default/fast/compact
+variants, and individual or batched queries. Handles are immutable after
+construction and can be queried concurrently from multiple threads.
+
+```sh
+cargo build --release
+cc -O2 -Iinclude my_program.c -Ltarget/release -lptr_hash \
+   -Wl,-rpath,"$PWD/target/release" -o my_program
+```
+
+```c
+#include "ptr_hash.h"
+
+ptr_hash_status status;
+ptr_hash_t *ph = ptr_hash_build_u64(keys, n, PTR_HASH_VARIANT_DEFAULT, &status);
+if (ph == NULL) {
+    fprintf(stderr, "%s\n", ptr_hash_last_error());
+    return 1;
+}
+
+uint64_t idx = ptr_hash_index_u64(ph, key); /* always < ptr_hash_len(ph) */
+ptr_hash_free(ph);
+```
+
+See [c_api/example.c](c_api/example.c) for a complete example.
+
 ## Sharding
 
 In order to build PtrHash on large sets of keys that do not fit in ram, the keys
